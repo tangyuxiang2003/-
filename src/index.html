@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>移动云盘批量上传工具</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <main class="app-shell">
+    <section class="tool-panel" aria-label="批量上传控制台">
+      <header class="tool-header">
+        <div>
+          <h1>批量上传</h1>
+          <p id="cloud-status">右侧登录移动云盘后使用</p>
+        </div>
+        <button class="icon-button" id="refresh-cloud" title="刷新右侧云盘">刷新</button>
+      </header>
+
+      <section class="panel-section">
+        <div class="section-title">
+          <h2>本地内容</h2>
+          <span id="local-summary">未选择</span>
+        </div>
+        <div class="button-row">
+          <button id="choose-files">选择文件</button>
+          <button id="choose-folders">选择文件夹</button>
+        </div>
+        <div id="local-list" class="list empty">暂无本地内容</div>
+      </section>
+
+      <section class="panel-section">
+        <div class="section-title">
+          <h2>目标文件夹</h2>
+          <span id="target-summary">0 个</span>
+        </div>
+        <button id="add-targets" class="primary">将选中文件夹加入目标</button>
+        <div id="target-list" class="list empty">暂无目标文件夹</div>
+      </section>
+
+      <section class="panel-section grow">
+        <div class="section-title">
+          <h2>上传结果</h2>
+          <span id="result-summary">等待上传</span>
+        </div>
+        <div id="result-list" class="list result-list empty">暂无上传记录</div>
+      </section>
+
+      <footer class="action-bar">
+        <button id="export-report" disabled>导出 Excel 清单</button>
+        <button id="start-upload" class="primary" disabled>开始上传</button>
+      </footer>
+    </section>
+
+    <section class="cloud-panel" aria-label="移动云盘">
+      <div class="cloud-toolbar">
+        <div class="url-pill" id="cloud-url">移动云盘</div>
+      </div>
+      <webview id="cloud-webview" partition="persist:139-cloud-tool" allowpopups></webview>
+    </section>
+  </main>
+
+  <div id="confirm-modal" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-box">
+      <h2>确认上传</h2>
+      <div class="confirm-grid">
+        <div>
+          <h3>本地内容</h3>
+          <div id="confirm-local" class="confirm-list"></div>
+        </div>
+        <div>
+          <h3>目标文件夹</h3>
+          <div id="confirm-targets" class="confirm-list"></div>
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button id="cancel-upload">取消</button>
+        <button id="confirm-upload" class="primary">确认上传</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="./renderer.js"></script>
+</body>
+</html>

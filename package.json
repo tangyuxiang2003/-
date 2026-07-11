@@ -1,0 +1,17 @@
+{
+  "name": "139-cloud-batch-uploader",
+  "version": "0.1.0",
+  "description": "移动云盘共享群批量上传桌面工具",
+  "main": "src/main.js",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "check": "node --check src/main.js && node --check src/preload.js && node --check src/renderer.js"
+  },
+  "devDependencies": {
+    "electron": "^31.7.7"
+  },
+  "dependencies": {
+    "write-excel-file": "^4.1.1"
+  }
+}
