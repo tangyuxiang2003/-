@@ -203,6 +203,76 @@ function waitForWebviewLoad(timeoutMs = 12000) {
   });
 }
 
+function normalizedPathParts(parts) {
+  return (parts || []).map((part) => String(part || "").replace(/\s+/g, " ").trim()).filter(Boolean);
+}
+
+function isExactCloudPath(info, expectedParts) {
+  const actual = normalizedPathParts(info?.parts);
+  const expected = normalizedPathParts(expectedParts);
+  return actual.length === expected.length && expected.every((part, index) => actual[index] === part);
+}
+
+function isCloudPathPrefix(info, expectedParts) {
+  const actual = normalizedPathParts(info?.parts);
+  const expected = normalizedPathParts(expectedParts);
+  return actual.length <= expected.length && actual.every((part, index) => actual[index] === part);
+}
+
+function isCloudPathDescendant(info, expectedParts) {
+  const actual = normalizedPathParts(info?.parts);
+  const expected = normalizedPathParts(expectedParts);
+  return actual.length > expected.length && expected.every((part, index) => actual[index] === part);
+}
+
+async function loadTargetGroup(target) {
+  // 每个目标都重新从其保存时所在的共享群地址开始。不能依赖当前网页地址：
+  // 移动云盘在群组之间切换时有时会保留相同的 SPA 地址，但页面内容仍是上一群。
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    if (attempt === 0) {
+      const openedList = await cloudEval(openSharedGroupListScript);
+      if (!openedList.ok) {
+        await loadCloudUrlFresh(target.parentUrl);
+      }
+    } else {
+      await loadCloudUrlFresh(target.parentUrl);
+    }
+
+    await waitForCloudIdle(1600);
+    const entered = await cloudEval(enterSharedGroupScript, target);
+    if (!entered.ok) {
+      if (attempt === 0) continue;
+      break;
+    }
+
+    for (let i = 0; i < 10; i += 1) {
+      await waitForCloudIdle(600);
+      const info = await cloudEval(getCurrentFolderInfoScript);
+      if (info.reliable && normalizedPathParts(info.parts)[0] === target.groupName) return;
+    }
+  }
+
+  await loadCloudUrlFresh(target.parentUrl);
+}
+
+async function loadCloudUrlFresh(url) {
+  const resetFinished = waitForWebviewLoad(5000);
+  els.webview.loadURL("about:blank");
+  await resetFinished;
+  await waitForCloudIdle(300);
+
+  const loadFinished = waitForWebviewLoad();
+  els.webview.loadURL(url);
+  await loadFinished;
+  await waitForCloudIdle(1200);
+}
+
+async function reloadCurrentCloudPage() {
+  const currentUrl = els.webview.getURL() || await window.cloudTool.getStartUrl();
+  await loadCloudUrlFresh(currentUrl);
+  await updateCloudStatus();
+}
+
 async function waitForCloudIdle(extraDelay = 900) {
   await wait(extraDelay);
 }
@@ -286,8 +356,22 @@ function getPageSelectionScript() {
   const parentFolders = pathParts.slice(1).filter((part) => part !== groupName);
   const parentPath = parentFolders.join("/");
 
-  const rowSelector = "tr,[role='row'],li,.file-item,.list-item,[class*='row' i],[class*='item' i],[class*='file' i]";
-  const possibleRows = Array.from(document.querySelectorAll(rowSelector))
+  // 移动云盘近期的页面把文件行改成了 document_table_* 容器，勾选状态
+  // 也不一定会暴露成 checkbox。除常规行元素外，把浅蓝色整行高亮作为兜底。
+  const rowSelector = "tr,[role='row'],li,.file-item,.list-item,[class*='row' i],[class*='item' i],[class*='file' i],[class*='document_table' i],[class*='table_row' i],[class*='list_row' i]";
+  const highlightedRows = allVisible.filter((el) => {
+    const rect = el.getBoundingClientRect();
+    return rect.top > listTop - 8
+      && rect.left >= listLeft - 80
+      && rect.height >= 28
+      && rect.height <= 130
+      && rect.width >= 240
+      && isSelectedTint(window.getComputedStyle(el).backgroundColor);
+  });
+  const possibleRows = Array.from(new Set([
+    ...document.querySelectorAll(rowSelector),
+    ...highlightedRows
+  ]))
     .filter(isVisible)
     .map((row) => ({ row, rect: row.getBoundingClientRect(), text: visibleText(row) }))
     .filter((item) => item.rect.top > listTop - 8 && item.rect.left >= listLeft - 80)
@@ -379,6 +463,7 @@ function getPageSelectionScript() {
     recognizedCount: checkedRows.length,
     recognizedNames: checkedRows.map((row) => row.folderName),
     listRows: possibleRows.map((row) => extractFolderName(row)).filter(Boolean).slice(0, 12),
+    highlightedRowCount: highlightedRows.length,
     pathParts
   };
 
@@ -442,7 +527,7 @@ function enterTargetFolderScript(target) {
     .find((item) => item.text === "文件名");
   const listTop = header ? header.rect.bottom : 0;
   const listLeft = header ? Math.max(0, header.rect.left - 90) : Math.max(0, window.innerWidth * 0.25);
-  const rowSelector = "tr,[role='row'],li,.file-item,.list-item,[class*='row' i],[class*='item' i],[class*='file' i]";
+  const rowSelector = "tr,[role='row'],li,.file-item,.list-item,[class*='row' i],[class*='item' i],[class*='file' i],[class*='document_table' i],[class*='table_row' i],[class*='list_row' i]";
   const rows = Array.from(document.querySelectorAll(rowSelector))
     .filter(isVisible)
     .map((row) => ({ row, rect: row.getBoundingClientRect(), text: visibleText(row) }))
@@ -465,6 +550,39 @@ function enterTargetFolderScript(target) {
   clickable.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
   clickable.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, cancelable: true, view: window }));
   return { ok: true };
+}
+
+function findTargetFolderClickPointScript(target) {
+  const visibleText = (el) => (el?.innerText || el?.textContent || "").replace(/\s+/g, " ").trim();
+  const isVisible = (el) => {
+    if (!el) return false;
+    const rect = el.getBoundingClientRect();
+    const style = window.getComputedStyle(el);
+    return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+  };
+  const cleanText = (text) => String(text || "").replace(/\s+/g, " ").trim();
+  const wanted = cleanText(target.folderName);
+  const header = Array.from(document.querySelectorAll("span,a,div,p"))
+    .filter(isVisible)
+    .find((el) => cleanText(visibleText(el)) === "文件名");
+  const listTop = header ? header.getBoundingClientRect().bottom : 220;
+  const labels = Array.from(document.querySelectorAll("span,a,div,p"))
+    .filter(isVisible)
+    .map((el) => ({
+      el,
+      text: cleanText(el.getAttribute("title") || el.getAttribute("aria-label") || visibleText(el)),
+      rect: el.getBoundingClientRect()
+    }))
+    .filter((item) => item.text === wanted)
+    .filter((item) => item.rect.width > 20 && item.rect.height > 12)
+    .filter((item) => item.rect.left > window.innerWidth * 0.18 && item.rect.top > listTop);
+  const label = labels.sort((a, b) => a.rect.top - b.rect.top)[0];
+  if (!label) return { ok: false, reason: `未找到目标文件夹：${wanted}` };
+  return {
+    ok: true,
+    x: Math.round(label.rect.left + Math.min(36, Math.max(8, label.rect.width / 2))),
+    y: Math.round(label.rect.top + label.rect.height / 2)
+  };
 }
 
 function getCurrentFolderInfoScript() {
@@ -504,7 +622,8 @@ function getCurrentFolderInfoScript() {
       href: location.href,
       title: document.title,
       parts: breadcrumbParts,
-      pathText: breadcrumbParts.join("/")
+      pathText: breadcrumbParts.join("/"),
+      reliable: true
     };
   }
 
@@ -525,7 +644,8 @@ function getCurrentFolderInfoScript() {
     href: location.href,
     title: document.title,
     parts,
-    pathText: parts.join("/")
+    pathText: parts.join("/"),
+    reliable: false
   };
 }
 
@@ -557,7 +677,7 @@ function pageListEntryInfoScript(name) {
     .find((item) => item.text === "文件名");
   const listTop = header ? header.rect.bottom : 0;
   const listLeft = header ? Math.max(0, header.rect.left - 90) : Math.max(0, window.innerWidth * 0.25);
-  const rowSelector = "tr,[role='row'],li,.file-item,.list-item,[class*='row' i],[class*='item' i],[class*='file' i]";
+  const rowSelector = "tr,[role='row'],li,.file-item,.list-item,[class*='row' i],[class*='item' i],[class*='file' i],[class*='document_table' i],[class*='table_row' i],[class*='list_row' i]";
   const rows = Array.from(document.querySelectorAll(rowSelector))
     .filter(isVisible)
     .map((row) => ({ row, rect: row.getBoundingClientRect(), text: visibleText(row) }))
@@ -595,6 +715,78 @@ function pageListEntryInfoScript(name) {
 
 function goBackScript() {
   window.history.back();
+  return { ok: true };
+}
+
+function openSharedGroupListScript() {
+  const visibleText = (el) => (el?.innerText || el?.textContent || "").replace(/\s+/g, " ").trim();
+  const isVisible = (el) => {
+    if (!el) return false;
+    const rect = el.getBoundingClientRect();
+    const style = window.getComputedStyle(el);
+    return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+  };
+  const cleanText = (text) => String(text || "").replace(/\s+/g, " ").trim();
+  const candidates = Array.from(document.querySelectorAll(".document_title_item_text, .document_title_item, a, span, div, li"))
+    .filter(isVisible)
+    .map((el) => ({
+      el,
+      text: cleanText(el.getAttribute("title") || el.getAttribute("aria-label") || visibleText(el)),
+      rect: el.getBoundingClientRect()
+    }))
+    .filter((item) => item.text);
+  const breadcrumb = candidates
+    .filter((item) => item.rect.top < 260 && item.rect.left > window.innerWidth * 0.25)
+    .find((item) => /^共享群组?$/.test(item.text) || item.text.includes("共享群组"));
+  if (breadcrumb) {
+    breadcrumb.el.click();
+    return { ok: true, via: "breadcrumb" };
+  }
+  const sideNav = candidates
+    .filter((item) => item.rect.left < window.innerWidth * 0.35)
+    .find((item) => /^共享群$/.test(item.text) || item.text === "共享群组");
+  if (sideNav) {
+    sideNav.el.click();
+    return { ok: true, via: "sidebar" };
+  }
+  return { ok: false, reason: "未找到共享群组入口。" };
+}
+
+function enterSharedGroupScript(target) {
+  const visibleText = (el) => (el?.innerText || el?.textContent || "").replace(/\s+/g, " ").trim();
+  const isVisible = (el) => {
+    if (!el) return false;
+    const rect = el.getBoundingClientRect();
+    const style = window.getComputedStyle(el);
+    return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+  };
+  const cleanText = (text) => String(text || "").replace(/\s+/g, " ").trim();
+  const wanted = cleanText(target.groupName);
+  const rowSelector = "tr,[role='row'],li,.file-item,.list-item,[class*='row' i],[class*='item' i],[class*='group' i],[class*='share' i]";
+  const rows = Array.from(document.querySelectorAll(rowSelector))
+    .filter(isVisible)
+    .map((row) => {
+      const attrs = Array.from(row.querySelectorAll("span,a,div,p"))
+        .filter(isVisible)
+        .map((el) => cleanText(el.getAttribute("title") || el.getAttribute("aria-label") || visibleText(el)))
+        .filter(Boolean)
+        .join(" ");
+      const text = cleanText(`${visibleText(row)} ${attrs}`);
+      return { row, text, rect: row.getBoundingClientRect() };
+    })
+    .filter((item) => item.text && item.rect.top > 120 && item.rect.left > window.innerWidth * 0.25);
+  const row = rows.find((item) => item.text.includes(wanted) || wanted.includes(item.text.split(/\s{2,}|\n/)[0]))
+    || rows.find((item) => item.text.includes(wanted.slice(0, 12)));
+  if (!row) {
+    return {
+      ok: false,
+      reason: `未找到共享群：${wanted}`,
+      groups: rows.map((item) => item.text).slice(0, 8)
+    };
+  }
+  row.row.scrollIntoView({ block: "center" });
+  row.row.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
+  row.row.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, cancelable: true, view: window }));
   return { ok: true };
 }
 
@@ -647,8 +839,9 @@ function refreshCurrentFolderScript() {
     button.click();
     return { ok: true, via: "button" };
   }
-  location.reload();
-  return { ok: true, via: "reload" };
+  // 不强制 location.reload()：共享群页面在嵌入窗口中整页重载时可能白屏。
+  // 没有找到网页自身的刷新入口时，让调用方等待并给出明确失败原因。
+  return { ok: false, reason: "未找到网页刷新入口。" };
 }
 
 function fileListReadyScript() {
@@ -661,12 +854,12 @@ function fileListReadyScript() {
   };
   const bodyText = visibleText(document.body);
   const hasHeader = bodyText.includes("文件名");
-  const rows = Array.from(document.querySelectorAll(".document_table_list,.file-item,.list-item,tr,[role='row'],[class*='row' i],[class*='item' i],[class*='file' i]"))
+  const rows = Array.from(document.querySelectorAll(".document_table_list,[class*='document_table' i],.file-item,.list-item,tr,[role='row'],[class*='row' i],[class*='item' i],[class*='file' i]"))
     .filter(isVisible)
     .map((row) => visibleText(row))
     .filter((text) => text && !text.includes("文件名") && !text.includes("创建者") && !text.includes("修改时间"));
   return {
-    ready: hasHeader && (rows.length > 0 || /暂无文件|暂无内容|共\s*0\s*项/.test(bodyText)),
+    ready: hasHeader && (rows.length > 0 || /暂无文件|暂无内容|共\s*\d+\s*项/.test(bodyText)),
     rowCount: rows.length
   };
 }
@@ -740,6 +933,8 @@ function uploadFileScript(payload) {
   });
   const dt = new DataTransfer();
   dt.items.add(file);
+  // 同名文件要上传到不同目标时，先清空旧值，确保网页会触发 change 事件。
+  try { input.value = ""; } catch (_error) { /* 部分网页控件不允许直接清空 */ }
   input.files = dt.files;
   input.dispatchEvent(new Event("input", { bubbles: true }));
   input.dispatchEvent(new Event("change", { bubbles: true }));
@@ -866,77 +1061,114 @@ function expectedParentPath(target) {
 }
 
 async function navigateToParentList(target) {
-  if (els.webview.getURL() !== target.parentUrl) {
-    els.webview.loadURL(target.parentUrl);
-    await waitForWebviewLoad();
-  }
-  await waitForCloudIdle();
-
   const parentPath = expectedParentPath(target);
+  const parentParts = parentPath.split("/").filter(Boolean);
   let lastListInfo = { exists: false, entries: [] };
-  for (let i = 0; i < 10; i += 1) {
-    const info = await cloudEval(getCurrentFolderInfoScript);
-    const lastPart = info.parts[info.parts.length - 1] || "";
-    lastListInfo = await cloudEval(pageListEntryInfoScript, target.folderName);
-    if (lastListInfo.exists) return;
+  let lastInfo = null;
 
-    if (lastPart === target.folderName || info.parts.length > parentPath.split("/").filter(Boolean).length || els.webview.getURL().includes("transfer")) {
-      const clicked = await cloudEval(clickParentBreadcrumbScript, target);
-      if (!clicked.ok) await cloudEval(goBackScript);
-      await waitForCloudIdle(900);
-      continue;
+  // 不复用上一个目标留下的页面。跨群时尤其重要：网页可能显示的是另一群，
+  // 但地址栏看起来仍像 groupfile 页面。
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    await loadTargetGroup(target);
+
+    // 目标可能在群根目录下，也可能在若干父目录中。若刚打开的是群根目录，
+    // 按保存时的完整父路径逐级进入，绝不在另一群中猜测同名目录。
+    for (let step = 0; step <= parentParts.length; step += 1) {
+      const info = await cloudEval(getCurrentFolderInfoScript);
+      lastInfo = info;
+      if (!info.reliable) break;
+
+      if (isExactCloudPath(info, parentParts)) {
+        for (let listAttempt = 0; listAttempt < 8; listAttempt += 1) {
+          await waitForFileListReady(2500);
+          lastListInfo = await cloudEval(pageListEntryInfoScript, target.folderName);
+          if (lastListInfo.exists) return;
+          if (lastListInfo.entries?.length) break;
+          if (listAttempt === 2 || listAttempt === 5) {
+            await cloudEval(refreshCurrentFolderScript);
+          }
+          await waitForCloudIdle(900);
+        }
+        break;
+      }
+
+      if (isCloudPathDescendant(info, parentParts)) {
+        const clicked = await cloudEval(clickParentBreadcrumbScript, target);
+        if (!clicked.ok) break;
+        await waitForCloudIdle(1000);
+        continue;
+      }
+
+      if (!isCloudPathPrefix(info, parentParts)) break;
+      const nextFolder = parentParts[info.parts.length];
+      if (!nextFolder) break;
+      await enterAndConfirmFolder(nextFolder, [...parentParts.slice(0, info.parts.length + 1)].join(" / "));
     }
-
-    await cloudEval(refreshCurrentFolderScript);
-    await waitForCloudIdle(1200);
   }
 
-  const finalInfo = await cloudEval(pageListEntryInfoScript, target.folderName);
-  if (!finalInfo.exists) {
-    const entries = (finalInfo.entries?.length ? finalInfo.entries : lastListInfo.entries || []).join("、") || "未识别到列表项";
-    throw new Error(`未回到目标文件夹所在列表：${target.displayPath}。当前识别到：${entries}`);
+  const finalInfo = lastInfo || await cloudEval(getCurrentFolderInfoScript);
+  const entries = (lastListInfo.entries || []).join("、") || "未识别到列表项";
+  const actualPath = normalizedPathParts(finalInfo.parts).join("/") || "未识别到面包屑";
+  if (!isExactCloudPath(finalInfo, parentParts)) {
+    throw new Error(`未能进入目标共享群及父目录：${parentPath}。当前页面为：${actualPath}。为避免跨群误传，已停止该目标上传。`);
   }
+  throw new Error(`未回到目标文件夹所在列表：${target.displayPath}。当前识别到：${entries}`);
 }
 
 async function navigateToTarget(target) {
   await navigateToParentList(target);
-  const entered = await cloudEval(enterTargetFolderScript, target);
-  if (!entered.ok) throw new Error(entered.reason || "无法进入目标文件夹。");
+  await enterAndConfirmFolder(target.folderName, target.displayPath);
+}
+
+async function openTargetFolder(target) {
+  const point = await cloudEval(findTargetFolderClickPointScript, target);
+  if (point.ok && typeof els.webview.sendInputEvent === "function") {
+    try {
+      const firstClick = { x: point.x, y: point.y, button: "left", clickCount: 1 };
+      els.webview.sendInputEvent({ type: "mouseDown", ...firstClick });
+      els.webview.sendInputEvent({ type: "mouseUp", ...firstClick });
+      await wait(120);
+      const secondClick = { x: point.x, y: point.y, button: "left", clickCount: 2 };
+      els.webview.sendInputEvent({ type: "mouseDown", ...secondClick });
+      els.webview.sendInputEvent({ type: "mouseUp", ...secondClick });
+      return { ok: true, via: "native-double-click" };
+    } catch (_error) {
+      // 某些 Electron 版本没有将 sendInputEvent 暴露给 webview，继续使用网页事件兜底。
+    }
+  }
+  return cloudEval(enterTargetFolderScript, target);
+}
+
+async function enterAndConfirmFolder(folderName, displayPath = folderName) {
+  const entered = await openTargetFolder({ folderName });
+  if (!entered.ok) throw new Error(entered.reason || `无法进入文件夹：${folderName}`);
   let confirmed = false;
-  let lastInfo = null;
   for (let i = 0; i < 12; i += 1) {
     await waitForCloudIdle(500);
-    lastInfo = await cloudEval(getCurrentFolderInfoScript);
+    const lastInfo = await cloudEval(getCurrentFolderInfoScript);
     const lastPart = lastInfo.parts[lastInfo.parts.length - 1];
-    if (lastPart === target.folderName) {
+    if (lastInfo.reliable && lastPart === folderName) {
       confirmed = true;
       break;
     }
   }
   if (!confirmed) {
-    throw new Error(`没有确认进入目标文件夹：${target.displayPath}。为避免传到同级目录，已停止上传。`);
+    throw new Error(`没有确认进入目标文件夹：${displayPath}。为避免传到同级目录，已停止上传。`);
   }
-  await waitForFileListReady();
+  const listState = await waitForFileListReady();
+  if (!listState.ready) {
+    // 新版移动云盘的列表内容有时可见、可操作，但不会向页面文本暴露
+    // “已就绪”标记。路径已经确认正确时，不把这个不可靠的检测当作硬性失败；
+    // 后续仍会由上传控件和上传后的目标目录核验决定是否成功。
+    await waitForCloudIdle(1800);
+  }
 }
 
 async function navigateToCloudPath(target, cloudPathParts) {
   await navigateToTarget(target);
   const descendants = cloudPathParts.slice(1).filter(Boolean);
   for (const folderName of descendants) {
-    const entered = await cloudEval(enterTargetFolderScript, { folderName });
-    if (!entered.ok) throw new Error(entered.reason || `无法进入文件夹：${folderName}`);
-    let confirmed = false;
-    for (let i = 0; i < 12; i += 1) {
-      await waitForCloudIdle(500);
-      const info = await cloudEval(getCurrentFolderInfoScript);
-      const lastPart = info.parts[info.parts.length - 1];
-      if (lastPart === folderName) {
-        confirmed = true;
-        break;
-      }
-    }
-    if (!confirmed) throw new Error(`没有确认进入文件夹：${folderName}`);
-    await waitForFileListReady();
+    await enterAndConfirmFolder(folderName, folderName);
   }
 }
 
@@ -945,8 +1177,14 @@ async function ensureFolder(name) {
   if (exists.exists) return { ok: false, skipped: true, reason: "目标位置已有同名文件夹。" };
   const created = await cloudEval(createFolderScript, name);
   if (!created.ok) return created;
-  await waitForCloudIdle(1200);
-  return { ok: true };
+  for (let i = 0; i < 8; i += 1) {
+    await waitForCloudIdle(700);
+    if ((await cloudEval(pageListEntryInfoScript, name)).exists) return { ok: true };
+    if (i === 2 || i === 5) {
+      await cloudEval(refreshCurrentFolderScript);
+    }
+  }
+  return { ok: false, reason: `新建文件夹后未在列表中确认：${name}` };
 }
 
 async function uploadOneFile(target, file, cloudPathParts) {
@@ -1021,8 +1259,23 @@ function buildFolderTree(files) {
 }
 
 async function processFolderTree(target, item, node, cloudPathParts, localPathParts = []) {
+  let failedCount = 0;
   for (const file of node.files) {
-    await uploadOneFile(target, file, cloudPathParts);
+    try {
+      await uploadOneFile(target, file, cloudPathParts);
+    } catch (error) {
+      failedCount += 1;
+      addResult({
+        groupName: target.groupName,
+        targetPath: target.displayPath,
+        localPath: file.path,
+        cloudPath: [...cloudPathParts, file.name].join(" / "),
+        kind: "文件",
+        size: file.size,
+        status: "失败",
+        reason: error.message || "上传失败。"
+      });
+    }
   }
 
   for (const child of node.dirs.values()) {
@@ -1042,15 +1295,47 @@ async function processFolderTree(target, item, node, cloudPathParts, localPathPa
       });
       continue;
     }
-    if (!created.ok) throw new Error(created.reason || `无法创建文件夹：${child.name}`);
+    if (!created.ok) {
+      failedCount += 1;
+      addResult({
+        groupName: target.groupName,
+        targetPath: target.displayPath,
+        localPath: localFolderPath,
+        cloudPath: childCloudPath,
+        kind: "文件夹",
+        size: "",
+        status: "失败",
+        reason: created.reason || `无法创建文件夹：${child.name}`
+      });
+      continue;
+    }
 
-    const entered = await cloudEval(enterTargetFolderScript, { folderName: child.name });
-    if (!entered.ok) throw new Error(entered.reason || `无法进入文件夹：${child.name}`);
-    await waitForCloudIdle(1000);
-    await processFolderTree(target, item, child, [...cloudPathParts, child.name], [...localPathParts, child.name]);
-    await cloudEval(goBackScript);
-    await waitForCloudIdle(1000);
+    let enteredChild = false;
+    try {
+      await enterAndConfirmFolder(child.name, childCloudPath);
+      enteredChild = true;
+      failedCount += await processFolderTree(target, item, child, [...cloudPathParts, child.name], [...localPathParts, child.name]);
+      await cloudEval(goBackScript);
+      await waitForCloudIdle(1000);
+    } catch (error) {
+      failedCount += 1;
+      addResult({
+        groupName: target.groupName,
+        targetPath: target.displayPath,
+        localPath: localFolderPath,
+        cloudPath: childCloudPath,
+        kind: "文件夹",
+        size: "",
+        status: "失败",
+        reason: error.message || `处理文件夹失败：${child.name}`
+      });
+      if (enteredChild) {
+        await cloudEval(goBackScript);
+        await waitForCloudIdle(1000);
+      }
+    }
   }
+  return failedCount;
 }
 
 async function uploadFolder(target, item) {
@@ -1071,12 +1356,10 @@ async function uploadFolder(target, item) {
   }
   if (!created.ok) throw new Error(created.reason || `无法创建文件夹：${item.name}`);
 
-  const entered = await cloudEval(enterTargetFolderScript, { folderName: item.name });
-  if (!entered.ok) throw new Error(entered.reason || `无法进入文件夹：${item.name}`);
-  await waitForCloudIdle(1200);
+  await enterAndConfirmFolder(item.name, cloudFolderPath);
 
   const tree = buildFolderTree(item.files);
-  await processFolderTree(target, item, tree, [target.displayPath, item.name]);
+  const failedCount = await processFolderTree(target, item, tree, [target.displayPath, item.name]);
   addResult({
     groupName: target.groupName,
     targetPath: target.displayPath,
@@ -1084,8 +1367,8 @@ async function uploadFolder(target, item) {
     cloudPath: cloudFolderPath,
     kind: "文件夹",
     size: item.size,
-    status: "成功",
-    reason: ""
+    status: failedCount ? "失败" : "成功",
+    reason: failedCount ? `文件夹内有 ${failedCount} 项未完成，请查看明细。` : ""
   });
 }
 
@@ -1205,7 +1488,7 @@ function bindEvents() {
   els.cancelUpload.addEventListener("click", hideConfirmModal);
   els.confirmUpload.addEventListener("click", startUpload);
   els.exportReport.addEventListener("click", exportReport);
-  els.refreshCloud.addEventListener("click", () => els.webview.reload());
+  els.refreshCloud.addEventListener("click", () => reloadCurrentCloudPage());
 
   els.localList.addEventListener("click", (event) => {
     const id = event.target?.dataset?.removeLocal;

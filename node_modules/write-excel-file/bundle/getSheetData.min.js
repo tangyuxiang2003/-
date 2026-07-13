@@ -1,2 +1,0 @@
-!function(e,t){"object"==typeof exports&&"undefined"!=typeof module?module.exports=t():"function"==typeof define&&define.amd?define(t):(e="undefined"!=typeof globalThis?globalThis:e||self).getSheetData=t()}(this,function(){"use strict";return function(e,t){let n;return t.some(e=>e.header)&&(n=t.map(({header:e})=>e||null)),(n?[n]:[]).concat(e.map((e,n)=>t.map(({cell:t})=>t(e,n))))}});
-//# sourceMappingURL=getSheetData.min.js.map

@@ -1,15 +1,34 @@
 {
   "name": "139-cloud-batch-uploader",
-  "version": "0.1.0",
+  "version": "0.1.4",
   "description": "移动云盘共享群批量上传桌面工具",
   "main": "src/main.js",
   "private": true,
   "scripts": {
     "start": "electron .",
-    "check": "node --check src/main.js && node --check src/preload.js && node --check src/renderer.js"
+    "check": "node --check src/main.js && node --check src/preload.js && node --check src/renderer.js",
+    "package:usb": "electron-builder --win portable"
+  },
+  "build": {
+    "appId": "com.139cloud.batch-uploader",
+    "productName": "移动云盘批量上传工具",
+    "files": [
+      "src/**/*",
+      "package.json"
+    ],
+    "win": {
+      "signAndEditExecutable": false,
+      "target": [
+        "portable"
+      ]
+    },
+    "portable": {
+      "artifactName": "移动云盘批量上传工具-${version}-便携版.exe"
+    }
   },
   "devDependencies": {
-    "electron": "^31.7.7"
+    "electron": "^31.7.7",
+    "electron-builder": "^24.13.3"
   },
   "dependencies": {
     "write-excel-file": "^4.1.1"

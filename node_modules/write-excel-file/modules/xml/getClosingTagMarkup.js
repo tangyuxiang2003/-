@@ -1,9 +1,0 @@
-/**
- * Returns XML for a "closing tag" with a given `tagName`.
- * @param {string} tagName
- * @returns {string}
- */
-export default function getClosingTagMarkup(tagName) {
-  return '</' + tagName + '>';
-}
-//# sourceMappingURL=getClosingTagMarkup.js.map
